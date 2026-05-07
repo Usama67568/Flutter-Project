@@ -1,0 +1,342 @@
+import 'package:flutter/material.dart';
+import 'package:geolocator/geolocator.dart';
+import 'package:intl/intl.dart';
+import '../models/prayer_time.dart';
+import '../services/prayer_time_service.dart';
+import '../services/location_service.dart';
+import '../services/notification_service.dart';
+import 'prayer_details_screen.dart';
+
+class HomeScreen extends StatefulWidget {
+  const HomeScreen({Key? key}) : super(key: key);
+
+  @override
+  State<HomeScreen> createState() => _HomeScreenState();
+}
+
+class _HomeScreenState extends State<HomeScreen> {
+  final LocationService _locationService = LocationService();
+  final NotificationService _notificationService = NotificationService();
+
+  DailyPrayers? _dailyPrayers;
+  Map<String, dynamic>? _currentLocation;
+  bool _isLoading = true;
+  String? _errorMessage;
+
+  @override
+  void initState() {
+    super.initState();
+    _initializeApp();
+  }
+
+  Future<void> _initializeApp() async {
+    try {
+      // Try to get saved location first
+      final savedLocation = await _locationService.getSavedLocation();
+
+      if (savedLocation != null) {
+        _currentLocation = savedLocation;
+        _calculatePrayerTimes();
+      } else {
+        // Get current location
+        final position = await _locationService.getCurrentLocation();
+        if (position != null) {
+          _currentLocation = {
+            'latitude': position.latitude,
+            'longitude': position.longitude,
+            'city': 'Current Location',
+          };
+          await _locationService.saveLocation(
+            position.latitude,
+            position.longitude,
+            'Current Location',
+          );
+          _calculatePrayerTimes();
+        } else {
+          setState(() {
+            _errorMessage = 'Unable to get your location';
+            _isLoading = false;
+          });
+        }
+      }
+    } catch (e) {
+      setState(() {
+        _errorMessage = 'Error: $e';
+        _isLoading = false;
+      });
+    }
+  }
+
+  void _calculatePrayerTimes() {
+    if (_currentLocation == null) return;
+
+    final prayers = PrayerTimeService.calculatePrayerTimes(
+      latitude: _currentLocation!['latitude'],
+      longitude: _currentLocation!['longitude'],
+      date: DateTime.now(),
+    );
+
+    setState(() {
+      _dailyPrayers = prayers;
+      _isLoading = false;
+    });
+
+    // Schedule notifications
+    _scheduleNotifications(prayers);
+  }
+
+  void _scheduleNotifications(DailyPrayers prayers) {
+    for (int i = 0; i < prayers.prayers.length; i++) {
+      final prayer = prayers.prayers[i];
+      _notificationService.schedulePrayerNotification(
+        prayerName: prayer.name,
+        scheduledTime: prayer.time,
+        notificationId: i,
+      );
+    }
+  }
+
+  Future<void> _refreshPrayerTimes() async {
+    setState(() => _isLoading = true);
+    await Future.delayed(const Duration(seconds: 1));
+    _calculatePrayerTimes();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Namaz Alert'),
+        centerTitle: true,
+        elevation: 0,
+      ),
+      body: _isLoading
+          ? const Center(child: CircularProgressIndicator())
+          : _errorMessage != null
+              ? _buildErrorWidget()
+              : _buildPrayerTimesWidget(),
+      floatingActionButton: FloatingActionButton(
+        onPressed: _refreshPrayerTimes,
+        tooltip: 'Refresh Prayer Times',
+        child: const Icon(Icons.refresh),
+      ),
+    );
+  }
+
+  Widget _buildErrorWidget() {
+    return Center(
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          const Icon(Icons.error_outline, size: 64, color: Colors.red),
+          const SizedBox(height: 16),
+          Text(
+            _errorMessage ?? 'An error occurred',
+            textAlign: TextAlign.center,
+            style: const TextStyle(fontSize: 16),
+          ),
+          const SizedBox(height: 24),
+          ElevatedButton(
+            onPressed: _initializeApp,
+            child: const Text('Retry'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildPrayerTimesWidget() {
+    if (_dailyPrayers == null) {
+      return const Center(child: CircularProgressIndicator());
+    }
+
+    final prayers = _dailyPrayers!.prayers;
+    final nextPrayer = _dailyPrayers!.nextPrayer;
+
+    return RefreshIndicator(
+      onRefresh: _refreshPrayerTimes,
+      child: CustomScrollView(
+        slivers: [
+          SliverToBoxAdapter(
+            child: Padding(
+              padding: const EdgeInsets.all(16.0),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  // Location Card
+                  Card(
+                    elevation: 2,
+                    child: Padding(
+                      padding: const EdgeInsets.all(16.0),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          const Text(
+                            'Location',
+                            style: TextStyle(
+                              fontSize: 12,
+                              color: Colors.grey,
+                            ),
+                          ),
+                          const SizedBox(height: 8),
+                          Text(
+                            _currentLocation?['city'] ?? 'Unknown',
+                            style: const TextStyle(
+                              fontSize: 18,
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
+                          const SizedBox(height: 8),
+                          Text(
+                            'Lat: ${_currentLocation?['latitude']?.toStringAsFixed(4)}, Lon: ${_currentLocation?['longitude']?.toStringAsFixed(4)}',
+                            style: const TextStyle(
+                              fontSize: 12,
+                              color: Colors.grey,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 16),
+
+                  // Date
+                  Text(
+                    DateFormat('EEEE, MMMM d, yyyy').format(DateTime.now()),
+                    style: const TextStyle(
+                      fontSize: 14,
+                      color: Colors.grey,
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+
+                  // Next Prayer Card
+                  if (nextPrayer != null)
+                    _buildNextPrayerCard(nextPrayer)
+                  else
+                    const Card(
+                      child: Padding(
+                        padding: EdgeInsets.all(16.0),
+                        child: Center(
+                          child: Text('No more prayers today'),
+                        ),
+                      ),
+                    ),
+                ],
+              ),
+            ),
+          ),
+
+          // Prayer List
+          SliverPadding(
+            padding: const EdgeInsets.symmetric(horizontal: 16.0),
+            sliver: SliverList(
+              delegate: SliverChildBuilderDelegate(
+                (context, index) {
+                  final prayer = prayers[index];
+                  return _buildPrayerTile(prayer, index);
+                },
+                childCount: prayers.length,
+              ),
+            ),
+          ),
+
+          const SliverToBoxAdapter(
+            child: SizedBox(height: 32),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildNextPrayerCard(PrayerTime prayer) {
+    final minutesLeft = prayer.minutesUntilPrayer;
+
+    return Card(
+      color: Colors.green,
+      child: Padding(
+        padding: const EdgeInsets.all(16.0),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              'Next Prayer',
+              style: TextStyle(
+                fontSize: 12,
+                color: Colors.white70,
+              ),
+            ),
+            const SizedBox(height: 8),
+            Text(
+              prayer.name,
+              style: const TextStyle(
+                fontSize: 24,
+                fontWeight: FontWeight.bold,
+                color: Colors.white,
+              ),
+            ),
+            const SizedBox(height: 8),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                Text(
+                  prayer.formattedTime,
+                  style: const TextStyle(
+                    fontSize: 20,
+                    color: Colors.white,
+                  ),
+                ),
+                if (minutesLeft > 0)
+                  Text(
+                    'in $minutesLeft min',
+                    style: const TextStyle(
+                      fontSize: 14,
+                      color: Colors.white70,
+                    ),
+                  ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildPrayerTile(PrayerTime prayer, int index) {
+    final isPassed = prayer.minutesUntilPrayer < 0;
+
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 8.0),
+      child: Card(
+        child: ListTile(
+          leading: CircleAvatar(
+            backgroundColor: isPassed ? Colors.grey : Colors.green,
+            child: Text(
+              (index + 1).toString(),
+              style: const TextStyle(color: Colors.white),
+            ),
+          ),
+          title: Text(prayer.name),
+          subtitle: Text(
+            isPassed ? 'Passed' : prayer.formattedTime,
+            style: TextStyle(
+              color: isPassed ? Colors.grey : Colors.black87,
+            ),
+          ),
+          trailing: Icon(
+            prayer.isNotificationEnabled ? Icons.notifications_on : Icons.notifications_off,
+            color: prayer.isNotificationEnabled ? Colors.green : Colors.grey,
+          ),
+          onTap: () {
+            Navigator.push(
+              context,
+              MaterialPageRoute(
+                builder: (context) => PrayerDetailsScreen(prayer: prayer),
+              ),
+            );
+          },
+        ),
+      ),
+    );
+  }
+}
